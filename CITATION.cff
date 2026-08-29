@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use GraceLoop, cite this software and the exact version and capsule digest you ran."
+title: "GraceLoop: prior-free counterfactual experiment-frontier compiler"
+type: software
+authors:
+  - family-names: Smith
+    given-names: Evan
+version: 0.1.0-alpha.1
+date-released: 2026-08-28
+license: Apache-2.0
+repository-code: "https://github.com/xevansmithx-del/graceloop"
+url: "https://github.com/xevansmithx-del/graceloop"
+keywords:
+  - bioinformatics
+  - counterfactual analysis
+  - experimental design
+  - provenance
+  - reproducible research

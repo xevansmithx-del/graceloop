@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.32"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync locked environment
+        run: uv sync --frozen --extra dev
+      - name: Test standalone release
+        run: uv run --frozen --no-sync pytest --cov=graceloop --cov-report=term-missing
+      - name: Compile source and tests
+        run: uv run --frozen --no-sync python -m compileall -q src tests examples
+
+  gracegraph-integration:
+    name: Pinned GraceGraph integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out GraceLoop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.32"
+      - name: Sync locked GraceLoop environment
+        run: uv sync --frozen --extra dev
+      - name: Acquire exact public GraceGraph tag
+        run: git clone --depth 1 --branch v0.1.0a1 https://github.com/xevansmithx-del/gracegraph.git "$RUNNER_TEMP/gracegraph"
+      - name: Compile synthetic GraceGraph capsule
+        env:
+          PYTHONPATH: ${{ runner.temp }}/gracegraph/src
+        run: |
+          python -m gracegraph.cli compile \
+            "$RUNNER_TEMP/gracegraph/examples/public-demo.json" \
+            --project-root "$RUNNER_TEMP/gracegraph" \
+            --out "$RUNNER_TEMP/gracegraph-capsule"
+      - name: Run exact pinned adapter tests
+        env:
+          GRACELOOP_GRACEGRAPH_SOURCE: ${{ runner.temp }}/gracegraph
+          GRACELOOP_GRACEGRAPH_CAPSULE: ${{ runner.temp }}/gracegraph-capsule
+        run: uv run --frozen --no-sync pytest tests/test_capture_adapters.py -k gracegraph
+
+  quality:
+    name: Release and trust-boundary checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pinned uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.32"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync locked environment
+        run: uv sync --frozen --extra dev
+      - name: Lint, format, hooks, and privacy
+        run: |
+          uv run --frozen --no-sync ruff check .
+          uv run --frozen --no-sync ruff format --check .
+          uv run --frozen --no-sync pre-commit run --all-files
+          uv run --frozen --no-sync python scripts/privacy_scan.py .
+      - name: Replay optimized-runtime boundary
+        run: |
+          normal=$(uv run --frozen --no-sync python tests/optimized_probe.py)
+          optimized=$(uv run --frozen --no-sync python -O tests/optimized_probe.py)
+          test "$normal" = "$optimized"
+      - name: Build and verify synthetic example
+        run: |
+          uv run --frozen --no-sync python examples/ckx/build_public_demo.py "$RUNNER_TEMP/graceloop-demo"
+          uv run --frozen --no-sync graceloop verify "$RUNNER_TEMP/graceloop-demo/capsule"
+      - name: Build and check packages
+        run: |
+          uv run --frozen --no-sync python -m build
+          uv run --frozen --no-sync python -m twine check dist/*
+          wheel=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          sdist=$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)
+          mkdir -p "$RUNNER_TEMP/wheel-tree" "$RUNNER_TEMP/sdist-tree"
+          uv run --frozen --no-sync python -m zipfile -e "$wheel" "$RUNNER_TEMP/wheel-tree"
+          uv run --frozen --no-sync python -m tarfile -e "$sdist" "$RUNNER_TEMP/sdist-tree"
+          uv run --frozen --no-sync python scripts/privacy_scan.py "$RUNNER_TEMP/wheel-tree"
+          uv run --frozen --no-sync python scripts/privacy_scan.py "$RUNNER_TEMP/sdist-tree"
+      - name: Installed-wheel smoke
+        run: |
+          uv venv "$RUNNER_TEMP/wheel-venv" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/graceloop" --version
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-venv/bin/python" "$GITHUB_WORKSPACE/examples/ckx/build_public_demo.py" "$RUNNER_TEMP/installed-demo"
+          "$RUNNER_TEMP/wheel-venv/bin/graceloop" verify "$RUNNER_TEMP/installed-demo/capsule"
+
+  source-manifest:
+    name: Exact source freeze
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify source manifest
+        run: sha256sum --check SOURCE_SHA256SUMS.txt
